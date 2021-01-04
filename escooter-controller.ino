@@ -110,7 +110,7 @@ void loop() {
   
 }
 */
-void Loop() {
+void loop() {
 
   if (transferState) {
 
