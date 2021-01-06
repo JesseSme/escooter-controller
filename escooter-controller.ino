@@ -1,16 +1,14 @@
 /*
- * 
- * 
- * 
- * 
- * 
- */
+*
+*
+*
+*
+*
+*/
 #include <MKRNB.h>
 #include <Arduino_MKRGPS.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
-
-#include <Scheduler.h>
 
 #include <Servo.h>
 
@@ -18,11 +16,10 @@
 
 
 //Variables
-uint16_t throttleValue = 0;
-uint16_t throttlePin   = A1;
+uint16_t throttlePin = A1;
 
-uint16_t startTime     = 0;
-uint16_t endTime       = 0;
+uint16_t startTime = 0;
+uint16_t endTime = 0;
 
 
 //Servo
@@ -30,16 +27,17 @@ Servo esc;
 
 
 //States
-int powerState      = 1;  //Needed? Controlled with the server, or something?
-int GPSDataState    = 1;  //Get gps data every now and then.
-int transferState   = 1;  //Transfer the data
-int ledBuiltInState = 1;  //For blinking led when needed.
+int powerState = 1;  //Needed? Controlled with the server, or something?
+int GPSDataState = 1;  //Get gps data every now and then.
+int transferState = 1;  //Transfer the data
+bool ledBuiltInState = true;  //For blinking led when needed.
+int written = 1;
 
 
 //Web client stuff. For AWS data POSTing.
 char server[] = "52.29.232.160";
-char path[]   = "/ipa/location";
-int port      = 80;
+char path[] = "/ipa/controller";
+int port = 80;
 
 NB nb;
 NBClient nbClient;
@@ -52,174 +50,187 @@ HttpClient client = HttpClient(nbClient, server, port);
 //const int capacity  = JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(4) + 401;
 DynamicJsonDocument doc(1024);
 JsonObject location = doc.createNestedObject("location");
-JsonObject epoch    = doc.createNestedObject("epoch");
-JsonObject senderip = doc.createNestedObject("senderip");
-
 
 
 void setup() {
 
-  pinMode(LED_BUILTIN, OUTPUT);
-  esc.attach(5);
-  
-  // initialize serial communications and wait for port to open:
-  Serial.begin(115200); // Just for debugging.
-  while (!Serial);
+				pinMode(LED_BUILTIN, OUTPUT);
 
-  bool notConnected = 1;
-  while (notConnected) {
+				hello();
+				esc.attach(5);
 
-    if (nb.begin(PINNUMBER) == NB_READY 
-     && gprs.attachGPRS()   == GPRS_READY) {
+				// initialize serial communications and wait for port to open:
+				Serial.begin(115200); // Just for debugging.
+				while (!Serial);
+				Serial.println("Initializing web client...");
 
-      notConnected = false;
-      Serial.println("");
-      
-    }
-    
-  }
+				bool notConnected = 1;
+				while (notConnected) {
+								Serial.println("Connecting...");
+								if (nb.begin(PINNUMBER) == NB_READY
+												&& gprs.attachGPRS() == GPRS_READY) {
+												Serial.println("Initialized web client...");
+												notConnected = false;
 
+								}
 
-  //Wait for GPS module to initialize.
-  if (!GPS.begin()) {
-    while (1) {
-      digitalWrite(LED_BUILTIN, !ledBuiltInState);
-      delay(500);
-    }
-  }
+				}
 
-  //Scheduler.startLoop(dataLoop);
+				Serial.println("Initializing GPS...");
+				//Wait for GPS module to initialize.
+				while (GPSDataState) {
+								if (GPS.begin()) {
+												GPSDataState = 0;
+												Serial.println("Initialized GPS...");
+								}
+				}
+
 }
 
 
 //Main loop
-/*
+
+//TODO: Does this need a state machine?
+//TODO: Acquire data from VESC
+//TODO: Finish servo signal control with the thumb pot  
+//TODO: Remote startup
+//TODO: Communication with server would probably work best with a websocket
 void loop() {
+				/*
+				esc.write(50);
+				int escValue = esc.read();
 
-  if (powerState) {
+				Serial.println(escValue);
+				*/
 
-    Serial.println("Setting PWM");
-    delayMicroseconds(setPWM());
-    
-    
-  } else {
+				if (transferState) {
 
-    delay(20);
-    
-  }
-  
+
+								if (getGPSInfo()) {
+												;
+												Serial.println("Getting GPS info...");
+												delay(100);
+
+												Serial.println("Posting GPS info...");
+
+												postGPSInfo();
+												delay(100);
+								}
+								if (millis() - startTime > 50) {
+												startTime = millis();
+												setPWM();
+												Serial.println(esc.readMicroseconds());
+								}
+
+
+				}
+				else {
+
+								Serial.println("Data has been sent?");
+								delay(1000);
+
+				}
 }
-*/
-void loop() {
 
-  if (transferState) {
 
-    Serial.println("Getting GPS info...");
+void hello() {
 
-    getGPSInfo();
-    delay(100);
+				for (int i = 0; i < 3; i++) {
+								digitalWrite(LED_BUILTIN, !ledBuiltInState);
+								delay(500);
+				}
 
-    Serial.println("Posting GPS info...");
-  
-    postGPSInfo();
-    delay(100);
-  
-  } else {
-
-    Serial.println("Data has been sent?");
-    delay(1000);
-    
-  }
-  //yield();
 }
 
 
 //Wake the scooter
 int wakeUp() {
 
-  /*
-   * Add a way to toggle the battery on the scooter, and wake all the modules from sleep.
-   */
+				/*
+				* Add a way to toggle the battery on the scooter, and wake all the modules from sleep.
+				*/
 
-  return 1;
+				return 1;
 }
 
 
 //Enters power saving mode.
 int putToSleep() {
 
-  /*
-   * Reverse the wakeup.
-   */
+				/*
+				* Reverse the wakeup.
+				*/
 
-  return 1;
+				return 1;
 }
 
 
 //Set servo control for VESC.
 uint16_t setPWM() {
-  
-  if (esc.attached()) {
-    throttleValue = 0;
-    throttleValue = analogRead(throttlePin);
-    //throttleValue = map(throttleValue, TODO, TODO, 1000, 2000);
-    esc.writeMicroseconds(throttleValue);
-  }
+				uint16_t throttleValue = 0;
 
-  return 20000 - throttleValue;
-  
+				if (esc.attached()) {
+								throttleValue = analogRead(throttlePin);
+								throttleValue = map(throttleValue, 270, 1023, 700, 2000);
+								esc.writeMicroseconds(throttleValue);
+				}
+
+				return throttleValue;
+
 }
 
 
 //Get location data from MKRGPS and save it in a JSON.
 //Also gets the time from MKRGPS and MKRNB
-void getGPSInfo() {
+int getGPSInfo() {
 
-  GPS.wakeup();
+				if (!GPS.available()) {
+								return 0;
+				};
+				//60.4599453199457, 22.28776938556175
 
-  while (!GPS.available()) {
-    delay(100);
-  }
+				location["latitude"] = GPS.latitude();
+				location["longitude"] = GPS.longitude();
+				doc["identifier"] = "Controller eScooter";
+				doc["epoch"] = nb.getTime();
+				//doc["senderip"]    = IPToString(gprs.getIPAddress());
+				doc["temp_out"] = 233.2;
+				doc["temp_batt"] = 32.3;
+				doc["temp_fet"] = 311.3;
+				doc["temp_motor"] = 45.5;
+				doc["average_motorcurrent"] = 55.6;
+				doc["average_inputcurrent"] = 445.6;
+				doc["input_voltage"] = 21.4;
+				doc["rpm"] = 99;
+				doc["tachometer"] = 22;
 
-  location["latitude"]    = GPS.latitude();
-  location["longitude"]   = GPS.longitude();
-  location["speed"]       = GPS.speed();
-  location["satellites"]  = GPS.satellites();
 
-  epoch["epoch-gps"]      = GPS.getTime();
-  epoch["epoch-nb"]       = nb.getTime();
-
-  senderip["senderip"]    = IPToString(gprs.getIPAddress());
-
-  GPS.standby();
 
 }
 
 
+//Creates a string for easy sending.
 String IPToString(IPAddress address) {
-  return String() + address[0] + "." + address[1] + "." + address[2] + "." + address[3];
+				return String() + address[0] + "." + address[1] + "." + address[2] + "." + address[3];
 }
 
 
 
 //Post gps data to AWS server
 void postGPSInfo() {
+				String contentType = "application/json";
+				String postData = doc.as<String>();
 
-  String contentType = "application/json";
-  String postData = doc.as<String>();
+				client.post(path, contentType, postData);
 
-  client.post("/ipa/location/", contentType, postData);
+				int statusCode = client.responseStatusCode();
+				String response = client.responseBody();
 
-  int statusCode = client.responseStatusCode();
-  String response = client.responseBody();
+				Serial.println("Status code:");
+				Serial.println(statusCode);
+				Serial.println("Response:");
+				Serial.println(response);
 
-  Serial.println("Status code:");
-  Serial.println(statusCode);
-  Serial.println("Response:");
-  Serial.println(response);
+				transferState = 0;
 
-  transferState = 0;
-
-  
-  
 }
