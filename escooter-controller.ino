@@ -9,6 +9,8 @@
 #include <Arduino_MKRGPS.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
+//#include <TinyGPSPlus.h>
+#include <SoftwareSerial.h>
 
 #include <Servo.h>
 
@@ -16,6 +18,7 @@
 
 
 //Variables
+uint16_t throttleValue = 0;
 uint16_t throttlePin = A1;
 
 uint16_t startTime = 0;
@@ -44,7 +47,8 @@ NBClient nbClient;
 GPRS gprs;
 IPAddress ip;
 HttpClient client = HttpClient(nbClient, server, port);
-
+//TinyGPSPlus gps;
+//SoftwareSerial ss1();
 
 //JSON created with ArduinoJson.h
 //const int capacity  = JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(4) + 401;
@@ -62,6 +66,7 @@ void setup() {
 				// initialize serial communications and wait for port to open:
 				Serial.begin(115200); // Just for debugging.
 				while (!Serial);
+
 				Serial.println("Initializing web client...");
 
 				bool notConnected = 1;
@@ -79,7 +84,7 @@ void setup() {
 				Serial.println("Initializing GPS...");
 				//Wait for GPS module to initialize.
 				while (GPSDataState) {
-								if (GPS.begin()) {
+								if (GPS.begin(GPS_MODE_SHIELD)) {
 												GPSDataState = 0;
 												Serial.println("Initialized GPS...");
 								}
@@ -132,7 +137,6 @@ void loop() {
 				}
 }
 
-
 void hello() {
 
 				for (int i = 0; i < 3; i++) {
@@ -167,9 +171,9 @@ int putToSleep() {
 
 //Set servo control for VESC.
 uint16_t setPWM() {
-				uint16_t throttleValue = 0;
 
 				if (esc.attached()) {
+								throttleValue = 0;
 								throttleValue = analogRead(throttlePin);
 								throttleValue = map(throttleValue, 270, 1023, 700, 2000);
 								esc.writeMicroseconds(throttleValue);
