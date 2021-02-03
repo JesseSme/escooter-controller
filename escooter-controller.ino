@@ -22,9 +22,19 @@
 #define DHTPIN 2     // Digital pin connected to the DHT sensor
 #define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
 
+//States
+enum ControllerStates {
+				IS_INIT,
+    IS_SLEEPING,
+    IS_IDLE,
+    IS_TRANSMITTING,
+    IS_CHECKING_SENSORS
+  };
+ControllerStates controllerState = IS_IDLE;
+
 //Data variables
 int temp = 0, hum = 0;
-int IMEI = 0;
+String IMEI = "";
 
 //Variables
 uint16_t throttleValue = 0;
@@ -78,7 +88,6 @@ void setup() {
 				digitalWrite(LED_BUILTIN, HIGH);
 
 				hello();
-				esc.attach(5);
 				pinMode(5, OUTPUT);
 				tone(5, 1000);
 				delay(100);
@@ -133,7 +142,20 @@ void loop() {
 
 						Serial.println(escValue);
 				*/
+				switch(controllerState) {
+								case IS_IDLE:
+												break;
+								case IS_CHECKING_SENSORS:
+												break;
+								case IS_TRANSMITTING:
+												break;
+								case IS_SLEEPING:
+												if (wakeUp()) controllerState = IS_IDLE;
+												break;
+				}
 
+
+				/*
 				if (transferState) {
 
 							if (getGPSInfo()) {
@@ -165,6 +187,7 @@ void loop() {
 							delay(1000);
 
 				}
+*/
 }
 
 void hello() {
@@ -180,11 +203,16 @@ void hello() {
 //Wake the scooter
 int wakeUp() {
 
+				if (client.available()) {
+								char c = client.read();
+								Serial.print(c);
+				}
+
 				/*
 						Add a way to toggle the battery on the scooter, and wake all the modules from sleep.
 				*/
 
-				return 1;
+				return 0;
 }
 
 
@@ -269,5 +297,11 @@ void postGPSInfo() {
 				Serial.println(response);
 
 				transferState = 0;
+
+}
+
+
+bool updateFlaskIP() {
+				
 
 }
