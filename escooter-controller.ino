@@ -25,11 +25,11 @@
 //States
 enum ControllerStates {
 				IS_INIT,
-    IS_SLEEPING,
-    IS_IDLE,
-    IS_TRANSMITTING,
-    IS_CHECKING_SENSORS
-  };
+				IS_SLEEPING,
+				IS_IDLE,
+				IS_TRANSMITTING,
+				IS_CHECKING_SENSORS
+};
 ControllerStates controllerState = IS_IDLE;
 
 //Data variables
@@ -64,8 +64,10 @@ int written = 1;
 
 //Web client stuff. For AWS data POSTing.
 char server[] = "52.29.232.160";
-char path[] = "/ipa/controller";
+char datapath[] = "/ipa/controller";
+char idpath[] = "/ipa/id";
 int port = 80;
+String localIP = "";
 
 NB nb;
 NBClient nbClient;
@@ -73,6 +75,7 @@ NBModem nbModem;
 GPRS gprs;
 IPAddress ip;
 HttpClient client = HttpClient(nbClient, server, port);
+
 //TinyGPSPlus gps;
 //SoftwareSerial ss(9, 8);
 
@@ -81,6 +84,8 @@ HttpClient client = HttpClient(nbClient, server, port);
 DynamicJsonDocument doc(1024);
 JsonObject location = doc.createNestedObject("location");
 
+DynamicJsonDocument id(256);
+
 
 void setup() {
 
@@ -88,15 +93,17 @@ void setup() {
 				digitalWrite(LED_BUILTIN, HIGH);
 
 				hello();
+				/*
 				pinMode(5, OUTPUT);
 				tone(5, 1000);
 				delay(100);
 				noTone(5);
 				pinMode(5, INPUT);
+				*/
 				// initialize serial communications and wait for port to open:
 				Serial.begin(115200); // Just for debugging.
-        Serial.println("Init temps...");
-        dht.begin();
+				Serial.println("Init temps...");
+				//dht.begin();
 
 				Serial.println("Initializing web client...");
 
@@ -112,19 +119,24 @@ void setup() {
 								}
 
 				}
-        IMEI = nbModem.getIMEI();
-       Serial.println(IMEI);
+				IMEI = nbModem.getIMEI();
+				id["imei"] = IMEI;
+				Serial.println(IMEI);
 
 				Serial.println("Initializing GPS...");
 				//Wait for GPS module to initialize.
 
 
 				while (GPSDataState) {
-								if (GPS.begin()) {
+								if (GPS.begin(GPS_MODE_SHIELD)) {
 												GPSDataState = 0;
 												Serial.println("Initialized GPS...");
 								}
 				}
+
+				localIP = getIP();
+				getSensorData();
+				postData(doc, datapath);
 }
 
 
@@ -134,7 +146,6 @@ void setup() {
 //TODO: Acquire data from VESC
 //TODO: Finish servo signal control with the thumb pot
 //TODO: Remote startup
-//TODO: Communication with server would probably work best with a websocket
 void loop() {
 				/*
 						esc.write(50);
@@ -142,8 +153,9 @@ void loop() {
 
 						Serial.println(escValue);
 				*/
-				switch(controllerState) {
+				switch (controllerState) {
 								case IS_IDLE:
+												
 												break;
 								case IS_CHECKING_SENSORS:
 												break;
@@ -160,7 +172,7 @@ void loop() {
 
 							if (getGPSInfo()) {
 											//Serial.println("Getting GPS info...");
-                        
+
 											Serial.println("Posting GPS info...");
 											postGPSInfo();
 							}
@@ -170,15 +182,15 @@ void loop() {
 											setPWM();
 											//Serial.println(esc.readMicroseconds());
 							}
-             if (millis() - tempStartTime > 2000) {
-                  tempStartTime = millis();
-                  hum = dht.readHumidity();
-                  temp = dht.readTemperature();
-                  Serial.print("Humidity: ");
-                  Serial.println(hum);
-                  Serial.print("Temperature: ");
-                  Serial.println(temp);
-             }
+													if (millis() - tempStartTime > 2000) {
+																		tempStartTime = millis();
+																		hum = dht.readHumidity();
+																		temp = dht.readTemperature();
+																		Serial.print("Humidity: ");
+																		Serial.println(hum);
+																		Serial.print("Temperature: ");
+																		Serial.println(temp);
+													}
 
 				}
 				else {
@@ -197,6 +209,21 @@ void hello() {
 								delay(500);
 				}
 
+}
+
+
+int startUp() {
+
+				String inData;
+				
+				while(client.available()) {
+								char readChar = client.read();
+								inData += readChar;
+				}
+				
+				Serial.println(inData);
+				
+				return 0;
 }
 
 
@@ -245,21 +272,21 @@ uint16_t setPWM() {
 
 //Get location data from MKRGPS and save it in a JSON.
 //Also gets the time from MKRGPS and MKRNB
-int getGPSInfo() {
-        /*
-				if (!GPS.available()) {
-								//Serial.println("No new GPS data found...");
-								return 0;
-				};
-        */
+int getSensorData() {
+				/*
+if (!GPS.available()) {
+				//Serial.println("No new GPS data found...");
+				return 0;
+};
+				*/
 				//, 
 
 				location["latitude"] = 60.4599453199457;//GPS.latitude();//gps.location.lat();//
 				location["longitude"] = 22.28776938556175;//GPS.longitude();//gps.location.lng();
 				doc["identifier"] = IMEI;
 				doc["epoch"] = nb.getTime();
-				doc["senderip"]    = IPToString(gprs.getIPAddress());
-				doc["temp_out"] = temp;
+				doc["senderip"] = localIP;
+				doc["temp_out"] = 2323; //temp;
 				doc["temp_batt"] = 32.3;
 				doc["temp_fet"] = 311.3;
 				doc["temp_motor"] = 45.5;
@@ -268,8 +295,6 @@ int getGPSInfo() {
 				doc["input_voltage"] = 21.4;
 				doc["rpm"] = 99;
 				doc["tachometer"] = 22;
-
-
 
 }
 
@@ -281,27 +306,70 @@ String IPToString(IPAddress address) {
 
 
 
-//Post gps data to AWS server
-void postGPSInfo() {
+//Post data to AWS server
+bool postData(DynamicJsonDocument document, char *postpath) {
 				String contentType = "application/json";
-				String postData = doc.as<String>();
+				String postData = document.as<String>();
 
-				client.post(path, contentType, postData);
+				if (client.connect(server, 80)) {
+								Serial.println(server);
+								Serial.println(postpath);
+								client.post(postpath, contentType, postData);
 
-				int statusCode = client.responseStatusCode();
-				String response = client.responseBody();
+								int statusCode = client.responseStatusCode();
+								Serial.println("TEst 1");
+								String response = client.responseBody();
+								Serial.println("TEst 2");
+								Serial.println("Status code:");
+								Serial.println(statusCode);
+								Serial.println("Response:");
+								Serial.println(response);
+								if (statusCode != 200) {
+												return 0;
+								}
 
-				Serial.println("Status code:");
-				Serial.println(statusCode);
-				Serial.println("Response:");
-				Serial.println(response);
+								transferState = 0;
 
-				transferState = 0;
-
+								return 1;
+				}
+				Serial.println("Failed to send...");
+				return 0;
 }
 
 
-bool updateFlaskIP() {
-				
+String getIP() {
+				int    HTTP_PORT = 80;
+				String HTTP_METHOD = "GET";
+				char   HOST_NAME[] = "api.ipify.org";
+				String PATH_NAME = "/";
+				String getPayload;
 
+				if (client.connect(HOST_NAME, HTTP_PORT)) {
+								// if connected:
+								Serial.println("Connected to server");
+								// make a HTTP request:
+								// send HTTP header
+								client.println(HTTP_METHOD + " " + PATH_NAME + " HTTP/1.1");
+								client.println("Host: " + String(HOST_NAME));
+								client.println("Connection: close");
+								client.println(); // end HTTP header
+
+								while (client.connected()) {
+												if (client.available()) {
+																char readChar = client.read();
+																getPayload += readChar;
+																// read an incoming byte from the server and print it to serial monitor:
+																
+												}
+								}
+								int length = getPayload.length();
+								getPayload = getPayload.substring(length - 16, length);
+								getPayload.trim();
+								Serial.println(getPayload);
+								client.stop();
+				
+								return getPayload;
+
+				}
+				return "ERROR: No IP gotten.";
 }
