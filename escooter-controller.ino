@@ -12,7 +12,6 @@
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
-#include <DHT_U.h>
 //#include <TinyGPS++.h>
 #include "SSRelay.h"
 
