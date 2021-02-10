@@ -23,3 +23,5 @@ __vm/Configuration.Release.vmps.xml
 *.opendb
 *.ipch
 *.xml
+.vs/escooter-controller/v14/.atsuo
+*.cppproj

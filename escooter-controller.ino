@@ -11,7 +11,7 @@
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
-#include <DHT_U.h>
+//#include <DHT_U.h>
 //#include <TinyGPSPlus.h>
 //#include <TinyGPS++.h>
 #include <Servo.h>
