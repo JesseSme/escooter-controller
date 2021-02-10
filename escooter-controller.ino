@@ -1,26 +1,40 @@
-
-
 /*
-
-
-
-
+				Name:											escooter-controller.ino
+				Author:									Jesse Smedberg
+				Description:				Controller code for Arduino MKR1500 to be used
+																				in conjunction with a VESC4.12.
+																				Gathers motor data from VESC using UART.
+																				Gathers temperature data from DHT22 temperature and
+																								moisture sensors.
+																				Gathers GPS data using 
 */
 #include <MKRNB.h>
-#include <Arduino_MKRGPS.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
 #include <DHT_U.h>
-//#include <TinyGPSPlus.h>
 //#include <TinyGPS++.h>
-#include <Servo.h>
+#include "SSRelay.h"
 
-//#include <SoftwareSerial.h>
+//VescUart libraries
+#include <VescUart.h>
+#include <datatypes.h>
+#include <crc.h>
+#include <buffer.h>
+#include "wiring_private.h"
 
-#define PINNUMBER "1234"
-#define DHTPIN 2     // Digital pin connected to the DHT sensor
-#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
+
+#define PINNUMBER											"1234"		// Sim pin
+#define DHTBATTPIN										6							// Digital pin connected to the DHT sensor
+#define DHTOUTPIN											7
+#define DHTTYPE													DHT22			// DHT 22  (AM2302), AM2321
+
+#define POWERCHECK_DELAY				5000
+#define VESCDATA_DELAY						2000
+#define TEMPERATURE_DELAY			1000
+#define POST_DELAY										5000
+#define GPS_DELAY											1000
+
 
 //States
 enum ControllerStates {
@@ -36,38 +50,26 @@ ControllerStates controllerState = IS_IDLE;
 int temp = 0, hum = 0;
 String IMEI = "";
 
-//Variables
-uint16_t throttleValue = 0;
-uint16_t throttlePin = A1;
+//States
+int requestState = 1;
 
+//Time variables
 uint32_t startTime = 0;
-uint32_t tempStartTime = 0;
-uint32_t endTime = 0;
 uint32_t tempEndTime = 0;
+uint32_t requestTime = 30000;
 
-
-//Servo
-Servo esc;
-
+uint32_t counterForDebug = 0;
 
 //Sensors
-DHT dht(DHTPIN, DHTTYPE);
-
-
-//States
-int powerState = 1;  //Needed? Controlled with the server, or something?
-int GPSDataState = 1;  //Get gps data every now and then.
-int transferState = 1;  //Transfer the data
-int ledBuiltInState = HIGH;  //For blinking led when needed.
-int written = 1;
-
+DHT dhtBatt(DHTBATTPIN, DHTTYPE);
+DHT dhtOut(DHTOUTPIN, DHTTYPE);
 
 //Web client stuff. For AWS data POSTing.
 char server[] = "52.29.232.160";
 char datapath[] = "/ipa/controller";
 char idpath[] = "/ipa/id";
+char powerpath[] = "/ipa/power_state";
 int port = 80;
-String localIP = "";
 
 NB nb;
 NBClient nbClient;
@@ -77,7 +79,6 @@ IPAddress ip;
 HttpClient client = HttpClient(nbClient, server, port);
 
 //TinyGPSPlus gps;
-//SoftwareSerial ss(9, 8);
 
 //JSON created with ArduinoJson.h
 //const int capacity  = JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(4) + 401;
@@ -86,57 +87,45 @@ JsonObject location = doc.createNestedObject("location");
 
 DynamicJsonDocument id(256);
 
+//VescUART setup
+VescUart VUART;
+//Initializes addiotional serial communications on pins 0 and 1.
+Uart SerialVESC(&sercom3, 1, 0, SERCOM_RX_PAD_1, UART_TX_PAD_0); // Create the new UART instance assigning it to pin 1 and 0
+void SERCOM3_Handler() {
+				SerialVESC.IrqHandler();
+}
+
 
 void setup() {
 
-        pinMode(LED_BUILTIN, OUTPUT);
-        digitalWrite(LED_BUILTIN, HIGH);
+				pinMode(LED_BUILTIN, OUTPUT);
+				digitalWrite(LED_BUILTIN, HIGH);
+				// initialize serial communications and wait for port to open:
+				Serial.begin(115200);
+				SerialVESC.begin(115200);
 
-        hello();
-        /*
-        pinMode(5, OUTPUT);
-        tone(5, 1000);
-        delay(100);
-        noTone(5);
-        pinMode(5, INPUT);
-        */
-        // initialize serial communications and wait for port to open:
-        Serial.begin(115200); // Just for debugging.
-        Serial.println("Init temps...");
-        //dht.begin();
+				pinPeripheral(1, PIO_SERCOM); //Assign RX function to pin 1
+				pinPeripheral(0, PIO_SERCOM); //Assign TX function to pin 0
+				Serial.println("Init temps...");
+				//dht.begin();
 
-        Serial.println("Initializing web client...");
+				Serial.println("Initializing web client...");
 
-        bool notConnected = 1;
-        while (notConnected) {
-                //Serial.println("Connecting...");
-                if (nb.begin(PINNUMBER) == NB_READY
-                        && gprs.attachGPRS() == GPRS_READY
-                        && nbModem.begin()) {
-                        Serial.println("Initialized web client...");
-                        notConnected = false;
+				bool notConnected = 1;
+				while (notConnected) {
+								//Serial.println("Connecting...");
+								if (nb.begin(PINNUMBER) == NB_READY
+								&& gprs.attachGPRS() == GPRS_READY) {
+												Serial.println("Initialized web client...");
+												notConnected = false;
+								}
+				}
+				IMEI = nbModem.getIMEI();
+				id["imei"] = IMEI;
+				Serial.println(IMEI);
 
-                }
+				client.setHttpResponseTimeout(requestTime);
 
-        }
-        IMEI = nbModem.getIMEI();
-        id["imei"] = IMEI;
-        Serial.println(IMEI);
-
-        Serial.println("Initializing GPS...");
-        //Wait for GPS module to initialize.
-
-
-        while (GPSDataState) {
-                if (GPS.begin(GPS_MODE_SHIELD)) {
-                        GPSDataState = 0;
-                        Serial.println("Initialized GPS...");
-                }
-        }
-
-        localIP = getIP();
-        getSensorData();
-        postData(doc, datapath);
 }
 
 
@@ -144,232 +133,177 @@ void setup() {
 
 //TODO: Does this need a state machine?
 //TODO: Acquire data from VESC
-//TODO: Finish servo signal control with the thumb pot
 //TODO: Remote startup
 void loop() {
-        /*
-            esc.write(50);
-            int escValue = esc.read();
 
-            Serial.println(escValue);
-        */
-        switch (controllerState) {
-                case IS_IDLE:
-                        
-                        break;
-                case IS_CHECKING_SENSORS:
-                        break;
-                case IS_TRANSMITTING:
-                        break;
-                case IS_SLEEPING:
-                        if (wakeUp()) controllerState = IS_IDLE;
-                        break;
-        }
+				//See powerState
+				if (requestState) {
+								if (powerStateRequest()) {
+												requestState = 0;
+												Serial.println("power request sent");
+								}
+				}
+				if (powerStateResponse()) {
+								requestState = 1;
+				}
 
 
-        /*
-        if (transferState) {
+}
 
-              if (getGPSInfo()) {
-                      //Serial.println("Getting GPS info...");
-
-                      Serial.println("Posting GPS info...");
-                      postGPSInfo();
-              }
-              if (millis() - startTime > 500) {
-                      startTime = millis();
-                      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-                      setPWM();
-                      //Serial.println(esc.readMicroseconds());
-              }
-                          if (millis() - tempStartTime > 2000) {
-                                    tempStartTime = millis();
-                                    hum = dht.readHumidity();
-                                    temp = dht.readTemperature();
-                                    Serial.print("Humidity: ");
-                                    Serial.println(hum);
-                                    Serial.print("Temperature: ");
-                                    Serial.println(temp);
-                          }
-
-        }
-        else {
-
-              Serial.println("Data has been sent?");
-              delay(1000);
-
-        }
+/*
+*			Gets the wanted power state from the server.
+* 
+*			Should be ran every 5s.
+* 
+*			@param	values						None
+*			@return values					1, if success
+*																						0, failed
 */
+int powerStateRequest() {
+
+				int err = 0;
+				err = client.get(powerpath);
+				Serial.println(err);
+				
+				if (err == 0) {
+								return 1;
+				}
+				return 0;
 }
 
-void hello() {
+/*
+*			Reads the response from aws server
+*			and resets the requestState, if
+*			no response arrives in time.
+*			
+*/
+int powerStateResponse() {
 
-        for (int i = 0; i < 3; i++) {
-                digitalWrite(LED_BUILTIN, i % 2);
-                delay(500);
-        }
+				int err = 0;
+				int ava = client.available();
+				int con = client.connected();
+				Serial.println("Incoming data status: ");
+				Serial.println(ava);
+				Serial.println("Connection status: ");
+				Serial.println(con);
+				if (client.available() 
+								|| client.connected()) {
+								err = client.responseStatusCode();
 
-}
-
-
-int startUp() {
-
-        String inData;
-        
-        while(client.available()) {
-                char readChar = client.read();
-                inData += readChar;
-        }
-        
-        Serial.println(inData);
-        
-        return 0;
-}
-
-
-//Wake the scooter
-int wakeUp() {
-
-        if (client.available()) {
-                char c = client.read();
-                Serial.print(c);
-        }
-
-        /*
-            Add a way to toggle the battery on the scooter, and wake all the modules from sleep.
-        */
-
-        return 0;
-}
-
-
-//Enters power saving mode.
-int putToSleep() {
-
-        /*
-            Reverse the wakeup.
-        */
-
-        return 1;
+								if (err == 200) {
+												String response = client.responseBody();
+												int intResponse = response.toInt();
+												Serial.println(err);
+												Serial.println(intResponse);
+												return 1;
+								}
+				} else {
+								Serial.println("Timed out...");
+								client.flush();
+								requestState = 1;
+								return 0;
+				}
+				return 0;
 }
 
 
-//Set servo control for VESC.
-uint16_t setPWM() {
-
-        if (esc.attached()) {
-                //Serial.println("Setting PWM...");
-                throttleValue = 0;
-                throttleValue = analogRead(throttlePin);
-                throttleValue = map(throttleValue, 270, 1023, 700, 2000);
-                esc.writeMicroseconds(throttleValue);
-        }
-
-        return throttleValue;
-
-}
 
 
 //Get location data from MKRGPS and save it in a JSON.
 //Also gets the time from MKRGPS and MKRNB
 int getSensorData() {
-        /*
-if (!GPS.available()) {
-        //Serial.println("No new GPS data found...");
-        return 0;
-};
-        */
-        //, 
-
-        location["latitude"] = 60.4599453199457;//GPS.latitude();//gps.location.lat();//
-        location["longitude"] = 22.28776938556175;//GPS.longitude();//gps.location.lng();
-        doc["identifier"] = IMEI;
-        doc["epoch"] = nb.getTime();
-        doc["senderip"] = localIP;
-        doc["temp_out"] = 2323; //temp;
-        doc["temp_batt"] = 32.3;
-        doc["temp_fet"] = 311.3;
-        doc["temp_motor"] = 45.5;
-        doc["average_motorcurrent"] = 55.6;
-        doc["average_inputcurrent"] = 445.6;
-        doc["input_voltage"] = 21.4;
-        doc["rpm"] = 99;
-        doc["tachometer"] = 22;
+				/*
+				if (!GPS.available()) {
+				//Serial.println("No new GPS data found...");
+				return 0;
+				};
+				*/
+				//,
+				location["latitude"] = 60.4599453199457;//GPS.latitude();//gps.location.lat();//
+				location["longitude"] = 22.28776938556175;//GPS.longitude();//gps.location.lng();
+				doc["identifier"] = IMEI;
+				doc["epoch"] = nb.getTime();
+				doc["temp_out"] = 2323;					//dhtOut.readTemperature();
+				doc["temp_batt"] = 32.3;				//dhtBatt.readTemperature();
+				doc["temp_fet"] = 311.3;				//vesc.data.tempFET
+				doc["temp_motor"] = 45.5;			//vesc.data.tempMotor
+				doc["average_motorcurrent"] = 55.6;					//vesc.data.avgMotorCurrent
+				doc["average_inputcurrent"] = 445.6;				//vesc.data.avgInputCurrent
+				doc["input_voltage"] = 21.4;				//vesc.data.inpVoltage
+				doc["rpm"] = 99;																//vesc.data.rpm
+				doc["tachometer"] = 22;									//vesc.data.tachometer
 
 }
 
 
 //Creates a string for easy sending.
 String IPToString(IPAddress address) {
-        return String() + address[0] + "." + address[1] + "." + address[2] + "." + address[3];
+				return String() + address[0] + "." + address[1] + "." + address[2] + "." + address[3];
 }
 
 
 
 //Post data to AWS server
 bool postData(DynamicJsonDocument document, char *postpath) {
-        String contentType = "application/json";
-        String postData = document.as<String>();
+				String contentType = "application/json";
+				String postData = document.as<String>();
 
-        if (client.connect(server, 80)) {
-                Serial.println(server);
-                Serial.println(postpath);
-                client.post(postpath, contentType, postData);
+				if (client.connect(server, 80)) {
+								Serial.println(server);
+								Serial.println(postpath);
+								client.post(postpath, contentType, postData);
 
-                int statusCode = client.responseStatusCode();
-                Serial.println("TEst 1");
-                String response = client.responseBody();
-                Serial.println("TEst 2");
-                Serial.println("Status code:");
-                Serial.println(statusCode);
-                Serial.println("Response:");
-                Serial.println(response);
-                if (statusCode != 200) {
-                        return 0;
-                }
+								int statusCode = client.responseStatusCode();
+								String response = client.responseBody();
+								Serial.println("Status code:");
+								Serial.println(statusCode);
+								Serial.println("Response:");
+								Serial.println(response);
+								if (statusCode != 200) {
+												return 0;
+								}
 
-                transferState = 0;
-
-                return 1;
-        }
-        Serial.println("Failed to send...");
-        return 0;
+								return 1;
+				}
+				Serial.println("Failed to send...");
+				return 0;
 }
 
 
+//Uses ipify api to GET own IP. 
+//No idea why there isn't a way to get own public ip from the device.
 String getIP() {
-        int    HTTP_PORT = 80;
-        String HTTP_METHOD = "GET";
-        char   HOST_NAME[] = "api.ipify.org";
-        String PATH_NAME = "/";
-        String getPayload;
+    int    HTTP_PORT = 80;
+    String HTTP_METHOD = "GET";
+    char   HOST_NAME[] = "api.ipify.org";
+    String PATH_NAME = "/";
+    String getPayload;
 
-        if (client.connect(HOST_NAME, HTTP_PORT)) {
-                // if connected:
-                Serial.println("Connected to server");
-                // make a HTTP request:
-                // send HTTP header
-                client.println(HTTP_METHOD + " " + PATH_NAME + " HTTP/1.1");
-                client.println("Host: " + String(HOST_NAME));
-                client.println("Connection: close");
-                client.println(); // end HTTP header
+				if (client.connect(HOST_NAME, HTTP_PORT)) {
+								// if connected:
+								Serial.println("Connected to server");
+								// make a HTTP request:
+								// send HTTP header
+								client.println(HTTP_METHOD + " " + PATH_NAME + " HTTP/1.1");
+								client.println("Host: " + String(HOST_NAME));
+								client.println("Connection: close");
+								client.println(); // end HTTP header
 
-                while (client.connected()) {
-                        if (client.available()) {
-                                char readChar = client.read();
-                                getPayload += readChar;
-                                // read an incoming byte from the server and print it to serial monitor:
-                                
-                        }
-                }
-                int length = getPayload.length();
-                getPayload = getPayload.substring(length - 16, length);
-                getPayload.trim();
-                Serial.println(getPayload);
-                client.stop();
+								while (client.connected()) {
+												if (client.available()) {
+																char readChar = client.read();
+																getPayload += readChar;
+																// read an incoming byte from the server and print it to serial monitor:            
+												}
+								}
+								int length = getPayload.length();
+								getPayload = getPayload.substring(length - 16, length);
+								getPayload.trim();
+								Serial.println(getPayload);
+								client.stop();
         
-                return getPayload;
+								return getPayload;
 
-        }
-        return "ERROR: No IP gotten.";
+				}
+				return "ERROR: No IP gotten.";
 }
