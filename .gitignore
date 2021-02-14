@@ -25,3 +25,4 @@ __vm/Configuration.Release.vmps.xml
 *.xml
 .vs/escooter-controller/v14/.atsuo
 *.cppproj
+escooter-controller.atsln
