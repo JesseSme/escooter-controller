@@ -1,19 +1,25 @@
 /*
-				Name:											escooter-controller.ino
-				Author:									Jesse Smedberg
+				Name:						escooter-controller.ino
+				Author:						Jesse Smedberg
 				Description:				Controller code for Arduino MKR1500 to be used
-																				in conjunction with a VESC4.12.
-																				Gathers motor data from VESC using UART.
-																				Gathers temperature data from DHT22 temperature and
-																								moisture sensors.
-																				Gathers GPS data using 
+											in conjunction with a VESC4.12.
+											Gathers motor data from VESC using UART.
+											Gathers temperature data from DHT22 temperature and
+											moisture sensors.
+											Gathers GPS data using a Adafruit Ultimate GPS Breakout V3 module
+											built around MTK3339.
 */
 #include <MKRNB.h>
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
-//#include <TinyGPS++.h>
+#include <TinyGPS++.h>
 #include "SSRelay.h"
+#include <ArduinoLowPower.h>
+
+//#include <NMEA_data.h>
+//#include <Adafruit_PMTK.h>
+#include <Adafruit_GPS.h>
 
 //VescUart libraries
 #include <VescUart.h>
@@ -23,16 +29,32 @@
 #include "wiring_private.h"
 
 
-#define PINNUMBER											"1234"		// Sim pin
-#define DHTBATTPIN										6							// Digital pin connected to the DHT sensor
-#define DHTOUTPIN											7
-#define DHTTYPE													DHT22			// DHT 22  (AM2302), AM2321
+//Macros
+#define PINNUMBER				"1234"		// Sim pin
+#define DHTTYPE					DHT22		// DHT 22  (AM2302), AM2321
 
-#define POWERCHECK_DELAY				5000
-#define VESCDATA_DELAY						2000
-#define TEMPERATURE_DELAY			1000
-#define POST_DELAY										5000
-#define GPS_DELAY											1000
+//Pins
+#define DHTBATTPIN										6			// Digital pin connected to the DHT sensor
+#define DHTOUTPIN											7
+
+//Hacky delays
+#define POWERCHECK_DELAY				15000
+#define VESC_DELAY										10000
+#define TEMPERATURE_DELAY			5000
+#define POST_DELAY										45000
+#define GPS_DELAY											5000
+#define TURN_OFF_DELAY						60000
+
+uint32_t turnoff_endtime				= 0;
+uint32_t powerCheck_endtime	= 0;
+uint32_t vesc_endtime							= 0;
+uint32_t temp_endtime							= 0;
+uint32_t post_endtime							= 0;
+uint32_t gps_endtime								= 0;
+
+#define NOW																					(uint32_t)millis()
+#define RUN_THIS(endtime, d)				(((NOW) - (endtime)) > (d))
+#define SerialGPS															Serial1
 
 
 //States
@@ -50,14 +72,8 @@ int temp = 0, hum = 0;
 String IMEI = "";
 
 //States
+int powerState = 0;
 int requestState = 1;
-
-//Time variables
-uint32_t startTime = 0;
-uint32_t tempEndTime = 0;
-uint32_t requestTime = 30000;
-
-uint32_t counterForDebug = 0;
 
 //Sensors
 DHT dhtBatt(DHTBATTPIN, DHTTYPE);
@@ -77,7 +93,8 @@ GPRS gprs;
 IPAddress ip;
 HttpClient client = HttpClient(nbClient, server, port);
 
-//TinyGPSPlus gps;
+TinyGPSPlus tppgps;
+Adafruit_GPS GPS(&SerialGPS);
 
 //JSON created with ArduinoJson.h
 //const int capacity  = JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(4) + 401;
@@ -88,7 +105,7 @@ DynamicJsonDocument id(256);
 
 //VescUART setup
 VescUart VUART;
-//Initializes addiotional serial communications on pins 0 and 1.
+//Initializes additional serial communications on pins 0 and 1.
 Uart SerialVESC(&sercom3, 1, 0, SERCOM_RX_PAD_1, UART_TX_PAD_0); // Create the new UART instance assigning it to pin 1 and 0
 void SERCOM3_Handler() {
 				SerialVESC.IrqHandler();
@@ -99,20 +116,25 @@ void setup() {
 
 				pinMode(LED_BUILTIN, OUTPUT);
 				digitalWrite(LED_BUILTIN, HIGH);
-				// initialize serial communications and wait for port to open:
-				Serial.begin(115200);
-				SerialVESC.begin(115200);
+				// initialize serial communications:
+				Serial.begin(9600);			//For debugging
+				SerialVESC.begin(115200);		//Vesc communication
+				//SerialGPS.begin(9600);
+				GPS.begin(9600);
+				GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+				GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
 
-				pinPeripheral(1, PIO_SERCOM); //Assign RX function to pin 1
-				pinPeripheral(0, PIO_SERCOM); //Assign TX function to pin 0
+
+				pinPeripheral(1, PIO_SERCOM);	//Assign RX function to pin 1
+				pinPeripheral(0, PIO_SERCOM);	//Assign TX function to pin 0
 				Serial.println("Init temps...");
-				//dht.begin();
+				dhtBatt.begin();
+				dhtOut.begin();
 
 				Serial.println("Initializing web client...");
 
 				bool notConnected = 1;
 				while (notConnected) {
-								//Serial.println("Connecting...");
 								if (nb.begin(PINNUMBER) == NB_READY
 								&& gprs.attachGPRS() == GPRS_READY) {
 												Serial.println("Initialized web client...");
@@ -120,33 +142,69 @@ void setup() {
 								}
 				}
 				IMEI = nbModem.getIMEI();
-				id["imei"] = IMEI;
-				Serial.println(IMEI);
+				//Initialize some fields.
+				doc["identifier"] = IMEI;
+				location["latitude"] = 0;
+				location["longitude"] = 0;
 
-				client.setHttpResponseTimeout(requestTime);
+				client.connectionKeepAlive();
+				client.setHttpResponseTimeout(5000);
+
+				VUART.setSerialPort(&SerialVESC);
 
 }
 
 
 //Main loop
 
-//TODO: Does this need a state machine?
 //TODO: Acquire data from VESC
 //TODO: Remote startup
 void loop() {
-
-				//See powerState
-				if (requestState) {
-								if (powerStateRequest()) {
-												requestState = 0;
+				
+				if (NOW - powerCheck_endtime > POWERCHECK_DELAY) {
+								int pSReq = powerStateRequest();
+								if (pSReq == 1) {
 												Serial.println("power request sent");
+								} else {
+												powerCheck_endtime = NOW;
+												return;
 								}
-				}
-				if (powerStateResponse()) {
-								requestState = 1;
+								Serial.println("Stuuuuuuuuck here?");
+								powerState = powerStateResponse();
+								switchRelayState(powerState);
+								Serial.println("Or here?");
+								powerCheck_endtime = NOW;
+								return;
 				}
 
+				if (NOW - gps_endtime > GPS_DELAY) {
+								getGPSData();
+								gps_endtime = NOW;
+								return;
+				}
+				digitalWrite(LED_BUILTIN, LOW);
 
+				if (NOW - vesc_endtime > VESC_DELAY) {
+								getVESCData();
+								vesc_endtime = NOW;
+								return;
+				}
+				if (NOW - temp_endtime > TEMPERATURE_DELAY) {
+								getTempData();
+								temp_endtime = NOW;
+								return;
+				}
+				if (NOW - post_endtime > POST_DELAY) {
+								doc["epoch"] = nb.getLocalTime();
+								if (postData(doc, datapath)) {
+												Serial.println("data POST");
+								} else {
+												Serial.println("data not posted...");
+								}
+								post_endtime = NOW;
+								return;
+				}
+				digitalWrite(LED_BUILTIN, HIGH);
 }
 
 /*
@@ -159,15 +217,20 @@ void loop() {
 *																						0, failed
 */
 int powerStateRequest() {
+				
+				Serial.println("Started powerStateRequest()");
 
 				int err = 0;
 				err = client.get(powerpath);
+				Serial.print("GET Errors: ");
 				Serial.println(err);
-				
 				if (err == 0) {
 								return 1;
-				}
-				return 0;
+				}	
+				client.flush();
+			 client.stop();
+				Serial.println("Stuck here?");
+				return err;
 }
 
 /*
@@ -177,100 +240,166 @@ int powerStateRequest() {
 *			
 */
 int powerStateResponse() {
-
+				Serial.println("started powerStateResponse()");
 				int err = 0;
-				int ava = client.available();
-				int con = client.connected();
-				Serial.println("Incoming data status: ");
-				Serial.println(ava);
-				Serial.println("Connection status: ");
-				Serial.println(con);
-				if (client.available() 
-								|| client.connected()) {
-								err = client.responseStatusCode();
+				uint8_t connectionStatus = client.connected();
+				Serial.println(connectionStatus);
+				if (connectionStatus) {
+								uint32_t test = NOW;
+								while (client.available() <= 0 || NOW - test < 5000) {
+												err = client.responseStatusCode();
 
-								if (err == 200) {
-												String response = client.responseBody();
-												int intResponse = response.toInt();
-												Serial.println(err);
-												Serial.println(intResponse);
-												return 1;
+													if (err == 200) {
+																		String response = client.responseBody();
+																		int intResponse = response.toInt();
+																		Serial.println(err);
+																		Serial.print("Power response: ");
+																		Serial.println(intResponse);
+																		return intResponse;
+													}
+													Serial.print("HTTP not OK. Code: ");
+													Serial.println(err);
+												 client.flush();
+												 client.stop();
 								}
 				} else {
-								Serial.println("Timed out...");
-								client.flush();
-								requestState = 1;
+								Serial.println("Disconnected...");
 								return 0;
 				}
 				return 0;
 }
 
+/*
+*/
+void getGPSData() {
+				Serial.println("started getGPSData()");
 
+				while (SerialGPS.available() > 0) {
+								char c = GPS.read();
+								if (GPS.newNMEAreceived()) {
+												Serial.println("parsing...");
+												if (!GPS.parse(GPS.lastNMEA())) {
+																return;
+												}
+
+												if (GPS.fix) {
+																float lati = (float)GPS.latitude_fixed / 10000000;
+																float lngi = (float)GPS.longitude_fixed / 10000000;
+																Serial.println(lati, 7);
+																Serial.println(lngi, 7);
+																location["latitude"] = lati;
+																location["longitude"] = lngi;
+												}
+								}
+				}
+
+
+				/*
+				while (SerialGPS.available() > 0) {
+								int err = gps.encode(SerialGPS.read());
+								Serial.println(err);
+								if (err) {
+												if (gps.location.isValid()) {
+																Serial.println("Valid location...");
+																location["latitude"] = gps.location.lat();
+																location["longitude"] = gps.location.lng();
+												} else {
+																Serial.println("Location not valid...");
+												}
+								} else {
+												Serial.println("Returns from getGPSData");
+												return;
+								}
+				}
+				*/
+}
+
+void getVESCData() {
+				Serial.println("started getVESCData()");
+				if (VUART.getVescValues()) {
+								doc["temp_fet"] = VUART.data.tempFET;
+								doc["temp_motor"] = VUART.data.tempMotor;
+								doc["average_motorcurrent"] = VUART.data.avgMotorCurrent;
+								doc["average_inputcurrent"] = VUART.data.avgInputCurrent;
+								doc["input_voltage"] = VUART.data.inpVoltage;
+								doc["rpm"] = VUART.data.rpm;
+								doc["tachometer"] = VUART.data.tachometer;
+				} else {
+								Serial.println("Vesc not connected...");
+								doc["temp_fet"] = -1;
+								doc["temp_motor"] = -1;
+								doc["average_motorcurrent"] = -1;
+								doc["average_inputcurrent"] = -1;
+								doc["input_voltage"] = -1;
+								doc["rpm"] = -1;
+								doc["tachometer"] = -1;
+				}
+}
+
+
+void getTempData() {
+				float outval = dhtOut.readTemperature();
+				float battval = dhtBatt.readTemperature();
+				Serial.println("outval read...");
+				if (!isnan(outval)) {
+								doc["temp_out"] = outval;
+				} else {
+								doc["temp_out"] = -1;
+				}
+				Serial.println("battval read...");
+				if (!isnan(battval)) {
+								doc["temp_batt"] = battval;
+				} else {
+								doc["temp_batt"] = -1;
+				}
+}
 
 
 //Get location data from MKRGPS and save it in a JSON.
 //Also gets the time from MKRGPS and MKRNB
-int getSensorData() {
-				/*
-				if (!GPS.available()) {
-				//Serial.println("No new GPS data found...");
-				return 0;
-				};
-				*/
-				//,
-				location["latitude"] = 60.4599453199457;//GPS.latitude();//gps.location.lat();//
-				location["longitude"] = 22.28776938556175;//GPS.longitude();//gps.location.lng();
-				doc["identifier"] = IMEI;
-				doc["epoch"] = nb.getTime();
-				doc["temp_out"] = 2323;					//dhtOut.readTemperature();
-				doc["temp_batt"] = 32.3;				//dhtBatt.readTemperature();
-				doc["temp_fet"] = 311.3;				//vesc.data.tempFET
-				doc["temp_motor"] = 45.5;			//vesc.data.tempMotor
-				doc["average_motorcurrent"] = 55.6;					//vesc.data.avgMotorCurrent
-				doc["average_inputcurrent"] = 445.6;				//vesc.data.avgInputCurrent
-				doc["input_voltage"] = 21.4;				//vesc.data.inpVoltage
-				doc["rpm"] = 99;																//vesc.data.rpm
-				doc["tachometer"] = 22;									//vesc.data.tachometer
-
+void setTime() {
+				
 }
-
-
-//Creates a string for easy sending.
-String IPToString(IPAddress address) {
-				return String() + address[0] + "." + address[1] + "." + address[2] + "." + address[3];
-}
-
 
 
 //Post data to AWS server
 bool postData(DynamicJsonDocument document, char *postpath) {
+
+				Serial.println("started postData()");
 				String contentType = "application/json";
 				String postData = document.as<String>();
-
-				if (client.connect(server, 80)) {
-								Serial.println(server);
-								Serial.println(postpath);
-								client.post(postpath, contentType, postData);
+				Serial.println("postData made...");
+				uint32_t errtime = NOW;
+				while (client.post(postpath, contentType, postData) || NOW - errtime > 15000);
+				int err = 0;
+				Serial.println(err);
+				if (err == 0) {
 
 								int statusCode = client.responseStatusCode();
-								String response = client.responseBody();
-								Serial.println("Status code:");
-								Serial.println(statusCode);
-								Serial.println("Response:");
-								Serial.println(response);
 								if (statusCode != 200) {
+												Serial.println("Status code:");
+												Serial.println(statusCode);
+												client.flush();
+												client.stop();
 												return 0;
 								}
+								String response = client.responseBody();
 
+								Serial.println("Response:");
+								Serial.println(response);
 								return 1;
 				}
+				client.flush();
+				client.stop();
+				
+
 				Serial.println("Failed to send...");
 				return 0;
 }
 
 
-//Uses ipify api to GET own IP. 
-//No idea why there isn't a way to get own public ip from the device.
+//An universal get request. 
+//TODO: Move to this in later versions.
 String getIP() {
     int    HTTP_PORT = 80;
     String HTTP_METHOD = "GET";
