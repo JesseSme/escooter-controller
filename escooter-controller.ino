@@ -15,7 +15,7 @@
 #include <DHT.h>
 #include <TinyGPS++.h>
 #include "SSRelay.h"
-#include <ArduinoLowPower.h>
+//#include <ArduinoLowPower.h>
 
 //#include <NMEA_data.h>
 //#include <Adafruit_PMTK.h>
@@ -30,8 +30,8 @@
 
 
 //Macros
-#define PINNUMBER				"1234"		// Sim pin
-#define DHTTYPE					DHT22		// DHT 22  (AM2302), AM2321
+#define PINNUMBER											"1234"		// Sim pin
+#define DHTTYPE													DHT22		// DHT 22  (AM2302), AM2321
 
 //Pins
 #define DHTBATTPIN										6			// Digital pin connected to the DHT sensor
@@ -44,6 +44,8 @@
 #define POST_DELAY										45000
 #define GPS_DELAY											5000
 #define TURN_OFF_DELAY						60000
+
+#define LOGGING													1
 
 uint32_t turnoff_endtime				= 0;
 uint32_t powerCheck_endtime	= 0;
@@ -220,17 +222,14 @@ int powerStateRequest() {
 				
 				Serial.println("Started powerStateRequest()");
 
-				int err = 0;
-				err = client.get(powerpath);
-				Serial.print("GET Errors: ");
-				Serial.println(err);
-				if (err == 0) {
-								return 1;
-				}	
-				client.flush();
-			 client.stop();
-				Serial.println("Stuck here?");
-				return err;
+				uint32_t errtime = NOW;
+				while (client.get(powerpath) > 0 || NOW - errtime > 5000) {
+								Serial.println("Error in get...");
+								client.stop();
+								return 0;
+				};
+				Serial.print("GET Success...");
+				return 1;
 }
 
 /*
@@ -246,7 +245,7 @@ int powerStateResponse() {
 				Serial.println(connectionStatus);
 				if (connectionStatus) {
 								uint32_t test = NOW;
-								while (client.available() <= 0 || NOW - test < 5000) {
+								while (client.available() <= 0 || NOW - test < 5000) { // <-- TODO: Clean up.
 												err = client.responseStatusCode();
 
 													if (err == 200) {
@@ -341,16 +340,16 @@ void getTempData() {
 				float outval = dhtOut.readTemperature();
 				float battval = dhtBatt.readTemperature();
 				Serial.println("outval read...");
-				if (!isnan(outval)) {
-								doc["temp_out"] = outval;
+				if (isnan(outval)) {
+        doc["temp_out"] = -1;
 				} else {
-								doc["temp_out"] = -1;
+        doc["temp_out"] = outval;
 				}
 				Serial.println("battval read...");
-				if (!isnan(battval)) {
-								doc["temp_batt"] = battval;
+				if (isnan(battval)) {
+        doc["temp_batt"] = -1;
 				} else {
-								doc["temp_batt"] = -1;
+        doc["temp_batt"] = battval;
 				}
 }
 
@@ -367,34 +366,29 @@ bool postData(DynamicJsonDocument document, char *postpath) {
 
 				Serial.println("started postData()");
 				String contentType = "application/json";
-				String postData = document.as<String>();
+				String data = document.as<String>();
 				Serial.println("postData made...");
 				uint32_t errtime = NOW;
-				while (client.post(postpath, contentType, postData) || NOW - errtime > 15000);
-				int err = 0;
-				Serial.println(err);
-				if (err == 0) {
+				while (client.post(postpath, contentType, data) > 0 || NOW - errtime > 5000) { 
+								Serial.println("Error in post...");
+								client.stop();
+								return 0; 
+				};
 
-								int statusCode = client.responseStatusCode();
-								if (statusCode != 200) {
-												Serial.println("Status code:");
-												Serial.println(statusCode);
-												client.flush();
-												client.stop();
-												return 0;
-								}
-								String response = client.responseBody();
-
-								Serial.println("Response:");
-								Serial.println(response);
-								return 1;
+				//If statuscode is anything else than 200, flush the incoming message and return.
+				int statusCode = client.responseStatusCode();
+				if (statusCode != 200) {
+								Serial.println("Status code:");
+								Serial.println(statusCode);
+								client.flush();
+								client.stop();
+								return 0;
 				}
-				client.flush();
-				client.stop();
-				
+				String response = client.responseBody();
 
-				Serial.println("Failed to send...");
-				return 0;
+				Serial.println("Response:");
+				Serial.println(response);
+				return 1;
 }
 
 
