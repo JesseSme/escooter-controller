@@ -5,10 +5,12 @@
 #include "SSRelay.h"
 
 bool _RelaySetup = 0;
+bool _PowerState = 0;
 
 
 void _setupRelay() {
 				pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, LOW);
 				_RelaySetup = 1;
 }
 
@@ -19,13 +21,21 @@ int switchRelayState(int state) {
 								_setupRelay();
 				} 
 				
-				if (digitalRead(RELAY_PIN) == state) {
+				if (_PowerState == state) {
 								return 1;
 				}
-				else {
-								digitalWrite(RELAY_PIN, state);
-								return 1;
+				else if (state == 1) {
+								digitalWrite(RELAY_PIN, HIGH);
+        delay(500);
+        digitalWrite(RELAY_PIN, LOW);
+								return 2;
 				}
+    else if (state == 0) {
+        digitalWrite(RELAY_PIN, HIGH);
+        delay(1200);
+        digitalWrite(RELAY_PIN, LOW);
+        return 3;
+    }
 
 				return 0;
 }
