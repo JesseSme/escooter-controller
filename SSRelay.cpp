@@ -26,14 +26,16 @@ int switchRelayState(int state) {
 				}
 				else if (state == 1) {
 								digitalWrite(RELAY_PIN, HIGH);
-        delay(500);
+        delay(700);
         digitalWrite(RELAY_PIN, LOW);
+								_PowerState = state;
 								return 2;
 				}
-    else if (state == 0) {
+    else if (state != _PowerState) {
         digitalWrite(RELAY_PIN, HIGH);
-        delay(1200);
+        delay(2000);
         digitalWrite(RELAY_PIN, LOW);
+								_PowerState = state;
         return 3;
     }
 

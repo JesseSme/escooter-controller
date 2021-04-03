@@ -64,6 +64,7 @@ String IMEI = "";
 
 //States
 int powerState = 0;
+int lastPowerState = 0;
 int requestState = 1;
 
 //Sensors
@@ -136,6 +137,7 @@ void setup() {
 				}
 				IMEI = nbModem.getIMEI();
 				//Initialize some fields.
+				Serial.println(IMEI);
 				doc["identifier"] = IMEI;
 				location["latitude"] = 0;
 				location["longitude"] = 0;
@@ -165,6 +167,10 @@ void loop() {
         //TODO: powerState has to be checked for change before switching relay.
 								powerState = powerStateResponse();
 								int sRSCode = switchRelayState(powerState);
+								//Serial.print("PowerState: ");
+								//Serial.println(powerState);
+								//Serial.println("lastPowerState: ");
+								//Serial.println(lastPowerState);
 								Serial.print("Relay code: ");
         Serial.println(sRSCode);
 								powerCheck_endtime = NOW;
@@ -351,7 +357,7 @@ bool postData(DynamicJsonDocument document, char *postpath) {
 								Serial.println("Status code:");
 								Serial.println(statusCode);
 								client.flush();
-								client.stop();
+								//client.stop();
 								return 0;
 				}
 				String response = client.responseBody();
