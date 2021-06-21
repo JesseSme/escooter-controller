@@ -27,7 +27,7 @@
 #include "wiring_private.h"
 #include "arduino_secrets.h"
 
-#include <MKRNB.h>
+#include "MKRNB.h"
 
 //Macros
 #define DHTTYPE													DHT22		// DHT 22  (AM2302), AM2321
@@ -124,9 +124,9 @@ void setup() {
     pinPeripheral(0, PIO_SERCOM);	//Assign TX function to pin 0
     // initialize serial communications:
     SerialVESC.setSerialPort(&VUART);
-    GPS.begin(9600);
-    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+    //GPS.begin(115200);
+    //GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    //GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
 
     //Serial.println("Init temps...");
     //dhtBatt.begin();
@@ -195,14 +195,12 @@ void loop() {
         return;
     }
     */
-    /*
-				if (NOW - gps_endtime > GPS_DELAY) {
-								getGPSData();
-								gps_endtime = NOW;
-								return;
-				}
-    */
-				digitalWrite(LED_BUILTIN, LOW);
+				//if (NOW - gps_endtime > GPS_DELAY) {
+				//				getGPSData();
+				//				gps_endtime = NOW;
+				//				return;
+				//}
+				//digitalWrite(LED_BUILTIN, LOW);
 
 				if (NOW - vesc_endtime > VESC_DELAY) {
 								getVESCData();
@@ -225,8 +223,8 @@ void loop() {
 								post_endtime = NOW;
 								return;
 				}
-				digitalWrite(LED_BUILTIN, HIGH);
-    delay(20);
+				//digitalWrite(LED_BUILTIN, HIGH);
+    //delay(20);
 }
 
 /*
