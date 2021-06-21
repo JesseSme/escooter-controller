@@ -9,16 +9,14 @@
 											Gathers GPS data using a Adafruit Ultimate GPS Breakout V3 module
 											built around MTK3339.
 */
-#include <MKRNB.h>
-#include <ArduinoHttpClient.h>
-#include <ArduinoJson.h>
-#include <DHT.h>
-#include <TinyGPS++.h>
-#include "SSRelay.h"
-//#include <ArduinoLowPower.h>
 
-//#include <NMEA_data.h>
-//#include <Adafruit_PMTK.h>
+#include <ArduinoJson.h>
+#include <ArduinoBearSSL.h>
+#include <ArduinoECCX08.h>
+#include "ArduinoMqttClient.h"
+#include <DHT.h>
+#include "SSRelay.h"
+
 #include <Adafruit_GPS.h>
 
 //VescUart libraries
@@ -27,40 +25,55 @@
 #include <crc.h>
 #include <buffer.h>
 #include "wiring_private.h"
+#include "arduino_secrets.h"
 
+#include <MKRNB.h>
 
 //Macros
-#define PINNUMBER											"1234"		// Sim pin
 #define DHTTYPE													DHT22		// DHT 22  (AM2302), AM2321
 
 //Pins
-#define DHTBATTPIN										6			// Digital pin connected to the DHT sensor
-#define DHTOUTPIN											7
+#define DHTBATTPIN          6			// Digital pin connected to the DHT sensor
+#define DHTOUTPIN           7
 
 //Hacky delays
-#define POWERCHECK_DELAY				15000
-#define VESC_DELAY										10000
-#define TEMPERATURE_DELAY			5000
-#define POST_DELAY										45000
-#define GPS_DELAY											5000
-#define TURN_OFF_DELAY						60000
+#define POWERCHECK_DELAY    15000
+#define VESC_DELAY          10000
+#define TEMPERATURE_DELAY   5000
+#define POST_DELAY          10000
+#define GPS_DELAY           5000
+#define TURN_OFF_DELAY      60000
+#define POLL_DELAY          1000
 
-#define LOGGING													1   //Clean up
-
-uint32_t turnoff_endtime				= 0;
-uint32_t powerCheck_endtime	= 0;
-uint32_t vesc_endtime							= 0;
-uint32_t temp_endtime							= 0;
-uint32_t post_endtime							= 0;
-uint32_t gps_endtime								= 0;
+uint32_t turnoff_endtime    = 0;
+uint32_t powerCheck_endtime = 0;
+uint32_t vesc_endtime       = 0;
+uint32_t temp_endtime       = 0;
+uint32_t post_endtime       = 0;
+uint32_t gps_endtime        = 0;
+uint32_t poll_endtime       = 0;
 
 #define NOW																					(uint32_t)millis()
 #define RUN_THIS(endtime, d)				(((NOW) - (endtime)) > (d))
 #define SerialGPS															Serial1
 
 //Data variables
-int temp = 0, hum = 0;
-String IMEI = "";
+//EPOCH
+unsigned long epoch = 0;
+//VESC
+float temp_fet = 0;
+float temp_motor = 0;
+float average_motorcurrent = 0;
+float average_inputcurrent = 0;
+float input_voltage = 0;
+int rpm = 0;
+int tachometer = 0;
+//GPS
+float lati = 0;
+float lngi = 0;
+//TEMPS
+float temp_out = -1;
+float temp_batt = -1;
 
 //States
 int powerState = 0;
@@ -72,27 +85,24 @@ DHT dhtBatt(DHTBATTPIN, DHTTYPE);
 DHT dhtOut(DHTOUTPIN, DHTTYPE);
 
 //Web client stuff. For AWS data POSTing.
-char server[] = "52.29.232.160";
-char datapath[] = "/ipa/controller";
-char idpath[] = "/ipa/id";
-char powerpath[] = "/ipa/power_state";
-int port = 80;
+const char basepath[]       = "scooter/jesse/";
+const char vescpath[]       = "vesc";
+const char temppath[]       = "temp";
+const char locapath[]       = "location";
+const char powerpath[]      = "power";
+String datapath             = "scooter/jesse/data";
+const char pinnumber[]      = SECRET_PINNUMBER;
+const char broker[]         = SECRET_BROKER;
+const char* certificate     = SECRET_CERTIFICATE;
 
-NB nb;
-NBClient nbClient;
-NBModem nbModem;
+NB nbAccess(true);
 GPRS gprs;
-IPAddress ip;
-HttpClient client = HttpClient(nbClient, server, port);
+
+NBClient nbClient;
+BearSSLClient   sslClient(nbClient);
+MqttClient  mqttClient(sslClient);
 
 Adafruit_GPS GPS(&SerialGPS);
-
-//JSON created with ArduinoJson.h
-//const int capacity  = JSON_OBJECT_SIZE(2) + JSON_OBJECT_SIZE(3) + JSON_OBJECT_SIZE(4) + 401;
-DynamicJsonDocument doc(1024);
-JsonObject location = doc.createNestedObject("location");
-
-DynamicJsonDocument id(256);
 
 //VescUART setup
 VescUart SerialVESC;
@@ -104,84 +114,94 @@ void SERCOM3_Handler() {
 
 
 void setup() {
-
-				pinMode(LED_BUILTIN, OUTPUT);
-				digitalWrite(LED_BUILTIN, HIGH);
+    Serial.begin(115200);			//For debugging
+    while (!Serial);
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
     switchRelayState(LOW);
     VUART.begin(115200);		//Vesc communication
     pinPeripheral(1, PIO_SERCOM);	//Assign RX function to pin 1
     pinPeripheral(0, PIO_SERCOM);	//Assign TX function to pin 0
-				// initialize serial communications:
-				Serial.begin(9600);			//For debugging
-				
-				//SerialGPS.begin(9600);
-				GPS.begin(9600);
-				GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-				GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+    // initialize serial communications:
+    SerialVESC.setSerialPort(&VUART);
+    GPS.begin(9600);
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
 
+    //Serial.println("Init temps...");
+    //dhtBatt.begin();
+    //dhtOut.begin();
+    if (!ECCX08.begin()) {
+        Serial.println("No ECCX08 present");
+        while (1);
+    }
+    ArduinoBearSSL.onGetTime(getTime);
+    sslClient.setEccSlot(0, certificate);
+    //Initialize some fields.
 
-
-				Serial.println("Init temps...");
-				dhtBatt.begin();
-				dhtOut.begin();
-
-				Serial.println("Initializing web client...");
-
-				bool notConnected = 1;
-				while (notConnected) {
-								if (nb.begin(PINNUMBER) == NB_READY
-								&& gprs.attachGPRS() == GPRS_READY) {
-												Serial.println("Initialized web client...");
-												notConnected = false;
-								}
-				}
-				IMEI = nbModem.getIMEI();
-				//Initialize some fields.
-				Serial.println(IMEI);
-				doc["identifier"] = IMEI;
-				location["latitude"] = 0;
-				location["longitude"] = 0;
-
-				client.connectionKeepAlive();
-				client.setHttpResponseTimeout(5000);
-
-				SerialVESC.setSerialPort(&VUART);
-
+    
+    //mqttClient.setId("JessesScooter1500");
+    mqttClient.onMessage(onMessageReceived);
+    Serial.println("Setup done...");
 }
 
 
 //Main loop
 
 void loop() {
-				
-				//powerStateRequest and Response should be melded together.
-				if (NOW - powerCheck_endtime > POWERCHECK_DELAY) {
-								int pSReq = powerStateRequest();
-								if (pSReq == 1) {
-												Serial.println("power request sent");
-								} else {
-												powerCheck_endtime = NOW;
-												return;
-								}
-								Serial.println("Stuuuuuuuuck here?");
-        //TODO: powerState has to be checked for change before switching relay.
-								powerState = powerStateResponse();
-								int sRSCode = switchRelayState(powerState);
-								//Serial.print("PowerState: ");
-								//Serial.println(powerState);
-								//Serial.println("lastPowerState: ");
-								//Serial.println(lastPowerState);
-								Serial.print("Relay code: ");
-        Serial.println(sRSCode);
-								powerCheck_endtime = NOW;
-								return;
-				}
+    if (nbAccess.status() != NB_READY || gprs.status() != GPRS_READY) {
+        Serial.print("Disconnected internet... ");
+        Serial.println(millis());
+        connectNB();
+        return;
+    }
+    /* ... */
+    if (!mqttClient.connected()) {
+        Serial.println("MQTT connection lost");
+        connectMQTT();
+        return;
+    }
+    
 
+				////powerStateRequest and Response should be melded together.
+				//if (NOW - powerCheck_endtime > POWERCHECK_DELAY) {
+				//				int pSReq = powerStateRequest();
+				//				if (pSReq == 1) {
+				//								Serial.println("power request sent");
+				//				} else {
+				//								powerCheck_endtime = NOW;
+				//								return;
+				//				}
+				//				Serial.println("Stuuuuuuuuck here?");
+    //    //TODO: powerState has to be checked for change before switching relay.
+				//				powerState = powerStateResponse();
+				//				int sRSCode = switchRelayState(powerState);
+				//				//Serial.print("PowerState: ");
+				//				//Serial.println(powerState);
+				//				//Serial.println("lastPowerState: ");
+				//				//Serial.println(lastPowerState);
+				//				Serial.print("Relay code: ");
+    //    Serial.println(sRSCode);
+				//				powerCheck_endtime = NOW;
+				//				return;
+				//}
+  mqttClient.poll();
+    /*
+    if (NOW - poll_endtime > POLL_DELAY) {
+        Serial.println("Polling...");
+        
+        Serial.println("Polled...");
+        poll_endtime = NOW;
+        return;
+    }
+    */
+    /*
 				if (NOW - gps_endtime > GPS_DELAY) {
 								getGPSData();
 								gps_endtime = NOW;
 								return;
 				}
+    */
 				digitalWrite(LED_BUILTIN, LOW);
 
 				if (NOW - vesc_endtime > VESC_DELAY) {
@@ -194,10 +214,11 @@ void loop() {
 								temp_endtime = NOW;
 								return;
 				}
-				if (NOW - post_endtime > POST_DELAY) {
-								doc["epoch"] = nb.getLocalTime();
-								if (postData(doc, datapath)) {
-												Serial.println("data POST");
+				if (NOW - post_endtime > POST_DELAY && mqttClient.connected()) {
+								epoch = nbAccess.getLocalTime();
+								if (postData(datapath)) {
+												Serial.print("data POST ");
+            Serial.println(millis());
 								} else {
 												Serial.println("data not posted...");
 								}
@@ -205,65 +226,7 @@ void loop() {
 								return;
 				}
 				digitalWrite(LED_BUILTIN, HIGH);
-}
-
-/*
-*			Gets the wanted power state from the server.
-* 
-*			@param	values						None
-*			@return values					1, if success
-*																						0, failed
-*/
-int powerStateRequest() {
-				
-				Serial.println("Started powerStateRequest()");
-
-				uint32_t errtime = NOW;
-				while (client.get(powerpath) > 0 || NOW - errtime > 5000) {
-								Serial.println("Error in get...");
-								client.stop();
-								return 0;
-				};
-				Serial.print("GET Success...");
-				return 1;
-}
-
-/*
-*			Reads the response from aws server
-*			and resets the requestState, if
-*			no response arrives in time.
-*			
-*/
-int powerStateResponse() {
-				Serial.println("started powerStateResponse()");
-				int err = 0;
-				uint8_t connectionStatus = client.connected();
-				Serial.println(connectionStatus);
-				if (connectionStatus) {
-								uint32_t test = NOW;
-								while (client.available() <= 0 || NOW - test < 5000) { // <-- TODO: Clean up.
-												err = client.responseStatusCode();
-
-													if (err == 200) {
-																		String response = client.responseBody();
-																		int intResponse = response.toInt();
-																		Serial.println(err);
-																		Serial.print("Power response: ");
-																		Serial.println(intResponse);
-																		return intResponse;
-													}
-													Serial.print("HTTP not OK. Code: ");
-													Serial.println(err);
-													client.flush();
-													client.stop();
-								}
-								Serial.println("Timed out or client not available...");
-								return 0;
-				} else {
-								Serial.println("Disconnected...");
-								return 0;
-				}
-				return 0;
+    delay(20);
 }
 
 /*
@@ -271,23 +234,23 @@ int powerStateResponse() {
 *   Check if 
 */
 void getGPSData() {
-				Serial.println("started getGPSData()");
+				Serial.print("started getGPSData() ");
+    Serial.println(millis());
 
 				while (SerialGPS.available() > 0) {
 								char c = GPS.read();
 								if (GPS.newNMEAreceived()) {
-												Serial.println("parsing...");
+												Serial.print("parsing... ");
+            Serial.println(millis());
 												if (!GPS.parse(GPS.lastNMEA())) {
 																return;
 												}
 
 												if (GPS.fix) {
-																float lati = (float)GPS.latitude_fixed / 10000000;
-																float lngi = (float)GPS.longitude_fixed / 10000000;
+																lati = (float)GPS.latitude_fixed / 10000000;
+																lngi = (float)GPS.longitude_fixed / 10000000;
 																Serial.println(lati, 7);
 																Serial.println(lngi, 7);
-																location["latitude"] = lati;
-																location["longitude"] = lngi;
 												}
 								}
 				}
@@ -297,24 +260,26 @@ void getGPSData() {
 * 
 */
 void getVESCData() {
-				Serial.println("started getVESCData()");
+				Serial.print("started getVESCData() ");
+    Serial.println(millis());
 				if (SerialVESC.getVescValues()) {
-								doc["temp_fet"] = SerialVESC.data.tempFET;
-								doc["temp_motor"] = SerialVESC.data.tempMotor;
-								doc["average_motorcurrent"] = SerialVESC.data.avgMotorCurrent;
-								doc["average_inputcurrent"] = SerialVESC.data.avgInputCurrent;
-								doc["input_voltage"] = SerialVESC.data.inpVoltage;
-								doc["rpm"] = SerialVESC.data.rpm;
-								doc["tachometer"] = SerialVESC.data.tachometer;
+								temp_fet = SerialVESC.data.tempFET;
+								temp_motor = SerialVESC.data.tempMotor;
+								average_motorcurrent = SerialVESC.data.avgMotorCurrent;
+								average_inputcurrent = SerialVESC.data.avgInputCurrent;
+								input_voltage = SerialVESC.data.inpVoltage;
+								rpm = SerialVESC.data.rpm;
+								tachometer = SerialVESC.data.tachometer;
 				} else {
-								Serial.println("Vesc not connected...");
-								doc["temp_fet"] = -1;
-								doc["temp_motor"] = -1;
-								doc["average_motorcurrent"] = -1;
-								doc["average_inputcurrent"] = -1;
-								doc["input_voltage"] = -1;
-								doc["rpm"] = -1;
-								doc["tachometer"] = -1;
+								Serial.print("Vesc not connected... ");
+        Serial.println(millis());
+								temp_fet = -1;
+								temp_motor = -1;
+								average_motorcurrent = -1;
+								average_inputcurrent = -1;
+								input_voltage = -1;
+								rpm = -1;
+								tachometer = -1;
 				}
 }
 
@@ -322,86 +287,118 @@ void getVESCData() {
 void getTempData() {
 				float outval = dhtOut.readTemperature();
 				float battval = dhtBatt.readTemperature();
-				Serial.println("outval read...");
+				Serial.print("outval read...");
+    Serial.println(millis());
 				if (isnan(outval)) {
-								doc["temp_out"] = -1;
+								temp_out = -1;
 				} else {
-								doc["temp_out"] = outval;
+								temp_out = outval;
 				}
-				Serial.println("battval read...");
+				Serial.print("battval read...");
+    Serial.println(millis());
 				if (isnan(battval)) {
-								doc["temp_batt"] = -1;
+								temp_batt = -1;
 				} else {
-								doc["temp_batt"] = battval;
+								temp_batt = battval;
 				}
 }
 
 
 //Post data to AWS server
-bool postData(DynamicJsonDocument document, char *postpath) {
+bool postData(String postpath) {
+    Serial.print("Publish begun...");
+    Serial.println(millis());
+    StaticJsonDocument<256> doc;
+    Serial.print("JsonDocument created...");
+    Serial.println(millis());
+    char output[256];
+    doc["identifier"] = SECRET_IMEI;
 
-				Serial.println("started postData()");
-				String contentType = "application/json";
-				String data = document.as<String>();
-				Serial.println("postData made...");
-				uint32_t errtime = NOW;
-				while (client.post(postpath, contentType, data) > 0 || NOW - errtime > 5000) { 
-								Serial.println("Error in post...");
-								client.stop();
-								return 0; 
-				};
+    JsonObject location = doc.createNestedObject("location");
+    location["longitude"] = lngi;
+    location["latitude"] = lati;
+    doc["temp_out"] = temp_out;
+    doc["temp_batt"] = temp_batt;
+    doc["temp_fet"] = temp_fet;
+    doc["temp_motor"] = temp_motor;
+    doc["average_motorcurrent"] = average_motorcurrent;
+    doc["average_inputcurrent"] = average_inputcurrent;
+    doc["input_voltage"] = input_voltage;
+    doc["rpm"] = rpm;
+    doc["tachometer"] = tachometer;
+    doc["epoch"] = epoch;
 
-				//If statuscode is anything else than 200, flush the incoming message and return.
-				int statusCode = client.responseStatusCode();
-				if (statusCode != 200) {
-								Serial.println("Status code:");
-								Serial.println(statusCode);
-								client.flush();
-								//client.stop();
-								return 0;
-				}
-				String response = client.responseBody();
+    Serial.print("JsonDocument filled...");
+    Serial.println(millis());
+    serializeJson(doc, output);
+    mqttClient.beginMessage(postpath);
+    mqttClient.print(output);
+    mqttClient.endMessage();
+        Serial.print("Message sent...");
+        Serial.println(millis());
+    // send message, the Print interface can be used to set the message contents
 
-				Serial.println("Response:");
-				Serial.println(response);
-				return 1;
+    return 1;
 }
 
 
-//An universal get request. 
-//TODO: Move to this in later versions.
-String getIP() {
-				int    HTTP_PORT = 80;
-				String HTTP_METHOD = "GET";
-				char   HOST_NAME[] = "api.ipify.org";
-				String PATH_NAME = "/";
-				String getPayload;
+void connectNB() {
+  Serial.println("Attempting to connect to the cellular network");
 
-				if (client.connect(HOST_NAME, HTTP_PORT)) {
-								// if connected:
-								Serial.println("Connected to server");
-								// make a HTTP request:
-								// send HTTP header
-								client.println(HTTP_METHOD + " " + PATH_NAME + " HTTP/1.1");
-								client.println("Host: " + String(HOST_NAME));
-								client.println("Connection: close");
-								client.println(); // end HTTP header
+  while ((nbAccess.begin(pinnumber) != NB_READY) ||
+         (gprs.attachGPRS() != GPRS_READY)) {
+    // failed, retry
+    Serial.print(".");
+    delay(1000);
+  }
 
-								while (client.connected()) {
-												if (client.available()) {
-																char readChar = client.read();
-																getPayload += readChar;
-																// read an incoming byte from the server and print it to serial monitor:            
-												}
-								}
-								int length = getPayload.length();
-								getPayload = getPayload.substring(length - 16, length);
-								getPayload.trim();
-								Serial.println(getPayload);
-								client.stop();
+  Serial.println("You're connected to the cellular network");
+  Serial.println();
+}
 
-								return getPayload;
 
-				}
-				return "ERROR: No IP gotten.";
+unsigned long getTime() {
+  // get the current time from the NB module
+  return nbAccess.getLocalTime();
+}
+
+void connectMQTT() {
+  Serial.print("Attempting to connect to the MQTT broker");
+
+  while (!mqttClient.connect(broker, 8883)) {
+      // failed, retry
+      Serial.println("");
+      Serial.print("mqttClient connection error: ");
+      Serial.println(mqttClient.connectError());
+      delay(5000);
+      if (nbAccess.status() != NB_READY || gprs.status() != GPRS_READY) {
+          connectNB();
+      }
+  }
+  Serial.println();
+
+  Serial.println("You're connected to the MQTT broker");
+  Serial.println();
+
+  // subscribe to a topic
+  mqttClient.subscribe("arduino/incoming");
+  mqttClient.subscribe(powerpath);
+}
+
+
+void onMessageReceived(int messageSize) {
+    // we received a message, print out the topic and contents
+    Serial.print("Received a message with topic '");
+    Serial.print(mqttClient.messageTopic());
+    Serial.print("', length ");
+    Serial.print(messageSize);
+    Serial.println(" bytes:");
+
+    // use the Stream interface to print the contents
+    while (mqttClient.available()) {
+        Serial.print((char)mqttClient.read());
+    }
+    Serial.println();
+
+    Serial.println();
 }

@@ -27,3 +27,9 @@ __vm/Configuration.Release.vmps.xml
 *.cppproj
 escooter-controller.atsln
 escooter-controller.sln
+arduino_secrets.h
+*.log
+.vs/ProjectSettings.json
+.vs/slnx.sqlite
+.vs/VSWorkspaceState.json
+Debug/escooter-controller.vcxproj.FileListAbsolute.txt
