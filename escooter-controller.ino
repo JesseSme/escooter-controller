@@ -29,6 +29,7 @@
 
 #include "MKRNB.h"
 
+#define ARDUINOJSON_USE_DOUBLE 1
 //Macros
 #define DHTTYPE													DHT22		// DHT 22  (AM2302), AM2321
 
@@ -55,7 +56,7 @@ uint32_t poll_endtime       = 0;
 
 #define NOW																					(uint32_t)millis()
 #define RUN_THIS(endtime, d)				(((NOW) - (endtime)) > (d))
-#define SerialGPS															Serial1
+//#define SerialGPS															Serial1
 
 //Data variables
 //EPOCH
@@ -102,7 +103,7 @@ NBClient nbClient;
 BearSSLClient   sslClient(nbClient);
 MqttClient  mqttClient(sslClient);
 
-Adafruit_GPS GPS(&SerialGPS);
+//Adafruit_GPS GPS(&SerialGPS);
 
 //VescUART setup
 VescUart SerialVESC;
@@ -231,28 +232,28 @@ void loop() {
 *   Reads location data from the GPS module.
 *   Check if 
 */
-void getGPSData() {
-				Serial.print("started getGPSData() ");
-    Serial.println(millis());
-
-				while (SerialGPS.available() > 0) {
-								char c = GPS.read();
-								if (GPS.newNMEAreceived()) {
-												Serial.print("parsing... ");
-            Serial.println(millis());
-												if (!GPS.parse(GPS.lastNMEA())) {
-																return;
-												}
-
-												if (GPS.fix) {
-																lati = (float)GPS.latitude_fixed / 10000000;
-																lngi = (float)GPS.longitude_fixed / 10000000;
-																Serial.println(lati, 7);
-																Serial.println(lngi, 7);
-												}
-								}
-				}
-}
+//void getGPSData() {
+//				Serial.print("started getGPSData() ");
+//    Serial.println(millis());
+//
+//				while (SerialGPS.available() > 0) {
+//								char c = GPS.read();
+//								if (GPS.newNMEAreceived()) {
+//												Serial.print("parsing... ");
+//            Serial.println(millis());
+//												if (!GPS.parse(GPS.lastNMEA())) {
+//																return;
+//												}
+//
+//												if (GPS.fix) {
+//																lati = (float)GPS.latitude_fixed / 10000000;
+//																lngi = (float)GPS.longitude_fixed / 10000000;
+//																Serial.println(lati, 7);
+//																Serial.println(lngi, 7);
+//												}
+//								}
+//				}
+//}
 
 /*
 * 
@@ -328,16 +329,53 @@ bool postData(String postpath) {
 
     Serial.print("JsonDocument filled...");
     Serial.println(millis());
-    serializeJson(doc, output);
     mqttClient.beginMessage(postpath);
-    mqttClient.print(output);
-    mqttClient.endMessage();
-        Serial.print("Message sent...");
-        Serial.println(millis());
     // send message, the Print interface can be used to set the message contents
+    //mqttClient.print(output);
+    serializeMsgPack(doc, mqttClient);
+    mqttClient.endMessage();
+    Serial.print("Message sent...");
+    Serial.println(millis());
 
     return 1;
 }
+
+////Post data to AWS server
+//bool postData(String postpath) {
+//    Serial.print("Publish begun...");
+//    Serial.println(millis());
+//    StaticJsonDocument<256> doc;
+//    Serial.print("JsonDocument created...");
+//    Serial.println(millis());
+//    char output[256];
+//    doc["identifier"] = SECRET_IMEI;
+//
+//    JsonObject location = doc.createNestedObject("location");
+//    location["longitude"] = lngi;
+//    location["latitude"] = lati;
+//    doc["temp_out"] = temp_out;
+//    doc["temp_batt"] = temp_batt;
+//    doc["temp_fet"] = temp_fet;
+//    doc["temp_motor"] = temp_motor;
+//    doc["average_motorcurrent"] = average_motorcurrent;
+//    doc["average_inputcurrent"] = average_inputcurrent;
+//    doc["input_voltage"] = input_voltage;
+//    doc["rpm"] = rpm;
+//    doc["tachometer"] = tachometer;
+//    doc["epoch"] = epoch;
+//
+//    Serial.print("JsonDocument filled...");
+//    Serial.println(millis());
+//    serializeJson(doc, output);
+//    mqttClient.beginMessage(postpath);
+//    mqttClient.print(output);
+//    mqttClient.endMessage();
+//        Serial.print("Message sent...");
+//        Serial.println(millis());
+//    // send message, the Print interface can be used to set the message contents
+//
+//    return 1;
+//}
 
 
 void connectNB() {
@@ -355,10 +393,11 @@ void connectNB() {
 }
 
 
+// get the current time from the NB module
 unsigned long getTime() {
-  // get the current time from the NB module
   return nbAccess.getLocalTime();
 }
+
 
 void connectMQTT() {
   Serial.print("Attempting to connect to the MQTT broker");

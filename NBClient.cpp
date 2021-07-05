@@ -290,8 +290,8 @@ size_t NBClient::write(const uint8_t* buf, size_t size)
   while (size) {
     size_t chunkSize = size;
 
-    if (chunkSize > 32) {
-      chunkSize = 32;
+    if (chunkSize > 64) {
+      chunkSize = 64;
     }
 
     command.reserve(19 + chunkSize * 2);
@@ -439,7 +439,7 @@ void NBClient::stop()
   }
 
   MODEM.sendf("AT+USOCL=%d", _socket);
-  MODEM.waitForResponse(120000);
+  MODEM.waitForResponse(150000);
 
   NBSocketBuffer.close(_socket);
 
